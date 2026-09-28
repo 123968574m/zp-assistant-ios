@@ -1,10 +1,11 @@
 import AVKit
 import AVFoundation
+import WebKit
 import UIKit
 
-/// 系统级悬浮：把提示词实时渲染成视频帧，用画中画（PiP）窗口播放。
-/// PiP 窗口可拖动/缩放，悬浮在桌面和任何其它应用之上。
-/// 后台持续渲染依赖： UIBackgroundModes=audio + 静音循环保活。
+/// 系统级悬浮（画中画）：提示词面板由离屏 WKWebView 渲染 HTML（含实时时钟），
+/// 定时截图推进 AVSampleBuffer 视频流，PiP 窗口悬浮在系统和任何应用上方。
+/// 后台持续渲染依赖：UIBackgroundModes=audio + 静音循环保活。
 final class FloatingPiPController: NSObject, ObservableObject {
     static let shared = FloatingPiPController()
 
@@ -17,6 +18,10 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var pool: CVPixelBufferPool?
     private var frameCount: Int64 = 0
     private var silencePlayer: AVAudioPlayer?
+    private var webView: WKWebView?
+    private var snapshotInFlight = false
+    private var lastSentStatus = "\u{0}"
+    private var lastSentText = "\u{0}"
     private var textProvider: (() -> String)?
     private var statusProvider: (() -> String)?
 
@@ -35,17 +40,38 @@ final class FloatingPiPController: NSObject, ObservableObject {
         try? session.setActive(true)
         startSilenceLoop()
 
+        // 1) 离屏 WebView：渲染提示词面板（时钟/状态/正文）
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: renderWidth, height: renderHeight))
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        webView.scrollView.isScrollEnabled = false
+        if let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene }).first?.windows.first(where: { $0.isKeyWindow }) {
+            let holder = UIView(frame: CGRect(x: -renderWidth - 4, y: 0,
+                                              width: renderWidth, height: renderHeight))
+            holder.addSubview(webView)
+            window.addSubview(holder)
+        }
+        webView.loadHTMLString(Self.panelHTML(), baseURL: nil)
+        self.webView = webView
+        lastSentStatus = "\u{0}"
+        lastSentText = "\u{0}"
+
+        // 2) PiP 视频源
         let layer = AVSampleBufferDisplayLayer()
         layer.videoGravity = .resizeAspect
         layer.frame = CGRect(x: 0, y: 0, width: renderWidth, height: renderHeight)
         sampleLayer = layer
-
         let source = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: layer,
             playbackDelegate: self)
         contentSource = source
 
-        // 挂到窗口外的 1x1 隐藏视图上（PiP 独立渲染窗口内容）
+        let pip = AVPictureInPictureController(contentSource: source)
+        pip.canStartPictureInPictureAutomaticallyFromInline = true
+        pip.delegate = self
+        pipController = pip
+
         if let window = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene }).first?.windows.first(where: { $0.isKeyWindow }) {
             let holder = UIView(frame: CGRect(x: -2, y: -2, width: 1, height: 1))
@@ -53,12 +79,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
             window.addSubview(holder)
         }
 
-        let pip = AVPictureInPictureController(contentSource: source)
-        pip.canStartPictureInPictureAutomaticallyFromInline = true
-        pip.delegate = self
-        pipController = pip
-
-        // 像素缓冲池
+        // 3) 像素缓冲池
         var attrs: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey: renderWidth,
@@ -70,12 +91,12 @@ final class FloatingPiPController: NSObject, ObservableObject {
         pool = newPool
 
         frameCount = 0
-        renderFrame()
         pip.startPictureInPicture()
 
-        // 10fps 定时重绘（后台靠静音保活持续触发）
+        // 4) 10fps：同步内容 → 截图 → 推帧
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.renderFrame()
+            self?.syncContent()
+            self?.captureFrame()
         }
         RunLoop.main.add(timer, forMode: .common)
         renderTimer = timer
@@ -97,40 +118,40 @@ final class FloatingPiPController: NSObject, ObservableObject {
         sampleLayer = nil
         contentSource = nil
         pipController = nil
+        webView?.removeFromSuperview()
+        webView = nil
         pool = nil
         DispatchQueue.main.async { self.active = false }
     }
 
-    private func startSilenceLoop() {
-        let sampleRate = 8000
-        let dataSize = sampleRate * 2 * 2 // 2 秒 16bit 单声道
-        var wav = Data()
-        func le32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
-        func le16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
-        wav.append(contentsOf: Array("RIFF".utf8))
-        le32(UInt32(36 + dataSize))
-        wav.append(contentsOf: Array("WAVE".utf8))
-        wav.append(contentsOf: Array("fmt ".utf8))
-        le32(16); le16(1); le16(1); le32(UInt32(sampleRate))
-        le32(UInt32(sampleRate * 2)); le16(2); le16(16)
-        wav.append(contentsOf: Array("data".utf8))
-        le32(UInt32(dataSize))
-        wav.append(Data(count: dataSize))
+    // MARK: - 内容同步与截图
 
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("silence.wav")
-        try? wav.write(to: url)
-        silencePlayer = try? AVAudioPlayer(contentsOf: url)
-        silencePlayer?.numberOfLoops = -1
-        silencePlayer?.volume = 0.01
-        silencePlayer?.play()
+    private func syncContent() {
+        guard let webView = webView else { return }
+        let status = statusProvider?() ?? ""
+        let text = textProvider?() ?? ""
+        if status != lastSentStatus || text != lastSentText {
+            lastSentStatus = status
+            lastSentText = text
+            if let data = try? JSONSerialization.data(withJSONObject: [status, text]),
+               let json = String(data: data, encoding: .utf8) {
+                webView.evaluateJavaScript("update.apply(null, \(json))", completionHandler: nil)
+            }
+        } else {
+            webView.evaluateJavaScript("tick()", completionHandler: nil)
+        }
     }
-}
 
-// MARK: - 帧渲染
+    private func captureFrame() {
+        guard !snapshotInFlight, let webView = webView else { return }
+        snapshotInFlight = true
+        webView.takeSnapshot(with: nil) { [weak self] image, _ in
+            self?.snapshotInFlight = false
+            if let image = image { self?.enqueue(image) }
+        }
+    }
 
-extension FloatingPiPController {
-
-    fileprivate func renderFrame() {
+    private func enqueue(_ image: UIImage) {
         guard let pool = pool, let layer = sampleLayer else { return }
         var pb: CVPixelBuffer?
         CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pb)
@@ -148,11 +169,19 @@ extension FloatingPiPController {
             ctx.setFillColor(UIColor.black.cgColor)
             ctx.fill(CGRect(x: 0, y: 0, width: renderWidth, height: renderHeight))
             UIGraphicsPushContext(ctx)
-            drawContent(size: CGSize(width: renderWidth, height: renderHeight))
+            image.draw(in: CGRect(x: 0, y: 0, width: renderWidth, height: renderHeight))
             UIGraphicsPopContext()
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
+        pushFrame(buffer, to: layer)
+    }
+}
 
+// MARK: - 推帧
+
+extension FloatingPiPController {
+
+    fileprivate func pushFrame(_ buffer: CVPixelBuffer, to layer: AVSampleBufferDisplayLayer) {
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 10),
             presentationTimeStamp: CMTime(value: frameCount, timescale: 10),
@@ -179,64 +208,61 @@ extension FloatingPiPController {
         if layer.status == .failed { layer.flush() }
         layer.enqueue(sb)
     }
+}
 
-    private func drawContent(size: CGSize) {
-        let text = textProvider?() ?? ""
-        let status = statusProvider?() ?? ""
+// MARK: - 悬浮面板 HTML（实时时钟 + 提示词）
 
-        // 顶栏：ZP助手 + 状态
-        let header = NSMutableAttributedString(
-            string: "ZP助手",
-            attributes: [.font: UIFont.systemFont(ofSize: 22, weight: .bold),
-                         .foregroundColor: UIColor.cyan])
-        if !status.isEmpty {
-            header.append(NSAttributedString(
-                string: "   " + status,
-                attributes: [.font: UIFont.systemFont(ofSize: 18),
-                             .foregroundColor: UIColor.yellow]))
-        }
-        header.draw(in: CGRect(x: 24, y: 14, width: size.width - 48, height: 30))
+extension FloatingPiPController {
 
-        // 正文：按长度自适应字号，超出画布时保留末尾（最新内容）
-        let inset: CGFloat = 24
-        let avail = CGSize(width: size.width - inset * 2, height: size.height - 66)
-        guard !text.isEmpty else {
-            NSAttributedString(string: "等待桌面端生成提示词…",
-                               attributes: [.font: UIFont.systemFont(ofSize: 30),
-                                            .foregroundColor: UIColor.gray])
-                .draw(in: CGRect(x: inset, y: 56, width: avail.width, height: avail.height))
-            return
-        }
-        let fontSize: CGFloat = text.count > 600 ? 26 : (text.count > 250 ? 30 : 34)
-        let para = NSMutableParagraphStyle()
-        para.lineSpacing = 6
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: fontSize),
-            .foregroundColor: UIColor.white,
-            .paragraphStyle: para
-        ]
+    static func panelHTML() -> String {
+        return """
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=720">
+<style>
+body{margin:0;width:720px;height:405px;background:#0c0e12;color:#e8e8ec;font-family:-apple-system,'PingFang SC',sans-serif;overflow:hidden}
+.bar{display:flex;justify-content:space-between;align-items:center;padding:8px 20px;background:linear-gradient(90deg,#123c6e,#0c0e12);border-bottom:1px solid #2a2f3a}
+.brand{color:#4dabf7;font-weight:700;font-size:19px;letter-spacing:1px}
+#st{color:#ffb340;font-size:15px;margin-left:auto;margin-right:18px}
+.clock{color:#fff;font-size:25px;font-weight:700;font-variant-numeric:tabular-nums}
+#text{padding:14px 22px;font-size:29px;line-height:1.5;white-space:pre-wrap;word-break:break-all;height:316px;overflow:hidden}
+</style></head><body>
+<div class="bar"><span class="brand">\u{9886}\u{822A}\u{8005}</span><span id="st"></span><span class="clock" id="clock">--:--:--</span></div>
+<div id="text">\u{7B49}\u{5F85}\u{684C}\u{9762}\u{7AEF}\u{751F}\u{6210}\u{63D0}\u{793A}\u{8BCD}\u{2026}</div>
+<script>
+function pad(n){return (n<10?'0':'')+n}
+function tick(){var d=new Date();document.getElementById('clock').textContent=pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())}
+setInterval(tick,200);tick();
+function update(st,text){document.getElementById('st').textContent=st;var el=document.getElementById('text');el.textContent=text||document.getElementById('text').getAttribute('data-empty')||'';el.scrollTop=el.scrollHeight}
+</script></body></html>
+"""
+    }
+}
 
-        func textHeight(_ s: String) -> CGFloat {
-            NSAttributedString(string: s, attributes: attrs).boundingRect(
-                with: CGSize(width: avail.width, height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).height
-        }
+// MARK: - 静音保活
 
-        var fitted = text
-        var h = textHeight(fitted)
-        if h > avail.height {
-            let drop = Int(CGFloat(fitted.count) * (1 - avail.height / h)) + 1
-            fitted = String(fitted.suffix(max(0, fitted.count - drop)))
-            if !fitted.hasPrefix("…") { fitted = "…" + fitted }
-            h = textHeight(fitted)
-            while h > avail.height && fitted.count > 8 {
-                fitted = String(fitted.dropFirst(max(8, fitted.count / 10)))
-                if !fitted.hasPrefix("…") { fitted = "…" + fitted }
-                h = textHeight(fitted)
-            }
-        }
-        NSAttributedString(string: fitted, attributes: attrs)
-            .draw(in: CGRect(x: inset, y: 56, width: avail.width, height: avail.height))
+extension FloatingPiPController {
+
+    fileprivate func startSilenceLoop() {
+        let sampleRate = 8000
+        let dataSize = sampleRate * 2 * 2 // 2 秒 16bit 单声道
+        var wav = Data()
+        func le32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
+        func le16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { wav.append(contentsOf: $0) } }
+        wav.append(contentsOf: Array("RIFF".utf8))
+        le32(UInt32(36 + dataSize))
+        wav.append(contentsOf: Array("WAVE".utf8))
+        wav.append(contentsOf: Array("fmt ".utf8))
+        le32(16); le16(1); le16(1); le32(UInt32(sampleRate))
+        le32(UInt32(sampleRate * 2)); le16(2); le16(16)
+        wav.append(contentsOf: Array("data".utf8))
+        le32(UInt32(dataSize))
+        wav.append(Data(count: dataSize))
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("silence.wav")
+        try? wav.write(to: url)
+        silencePlayer = try? AVAudioPlayer(contentsOf: url)
+        silencePlayer?.numberOfLoops = -1
+        silencePlayer?.volume = 0.01
+        silencePlayer?.play()
     }
 }
 
