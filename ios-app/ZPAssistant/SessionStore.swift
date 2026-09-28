@@ -119,6 +119,7 @@ final class SessionStore: ObservableObject {
         socket = sk
         bind(sk)
         setMain(.connecting) { self.connState = $0 }
+        PiPDebug.log("云端：连接 navway.cc.cd/phone …")
         sk.connect()
     }
 
@@ -140,6 +141,8 @@ final class SessionStore: ObservableObject {
                 self.setMain(.connected) { self.connState = $0 }
                 // 连上后向桌面端要一次当前回答全文，补齐掉线窗口内丢失的分片
                 sk.emit("answer_resync")
+            } else {
+                PiPDebug.log("云端：/phone 已连接，等待设备列表")
             }
             // 云端模式在 bound 之后才算连上
         }
@@ -148,7 +151,9 @@ final class SessionStore: ObservableObject {
             let reason = data.first as? String ?? ""
             self?.setMain(reason == "manual" ? .disconnected : .connecting) { self?.connState = $0 }
         }
-        sk.on(clientEvent: .error) { [weak self] _, _ in
+        sk.on(clientEvent: .error) { [weak self] data, _ in
+            let msg = data.first as? String ?? "unknown"
+            PiPDebug.log("socket 错误：\(msg)")
             self?.setMain(.failed) { self?.connState = $0 }
         }
         sk.on("response_mode") { [weak self] data, _ in
@@ -203,10 +208,12 @@ final class SessionStore: ObservableObject {
                 let name = entry["name"] as? String ?? "未命名电脑"
                 return RelayHost(id: id, name: name)
             }
+            PiPDebug.log("云端：收到设备列表，共 \(hosts.count) 台")
             self?.setMain(hosts) { self?.hosts = $0 }
         }
         sk.on("bound") { [weak self] _, _ in
             guard let self = self else { return }
+            PiPDebug.log("云端：配对成功，进入会话")
             self.lastSeq = 0
             self.setMain(.connected) { self.connState = $0 }
             sk.emit("answer_resync")
@@ -215,6 +222,7 @@ final class SessionStore: ObservableObject {
             guard let self = self else { return }
             let obj = data.first as? [String: Any]
             let msg = obj?["message"] as? String ?? "配对失败，请确认 6 位访问码"
+            PiPDebug.log("云端：配对失败 - \(msg)")
             self.setMain(msg) { self.bindError = $0 }
         }
         sk.on("host_gone") { [weak self] _, _ in
