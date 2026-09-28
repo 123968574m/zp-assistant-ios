@@ -1,3 +1,4 @@
+import AVKit
 import AVFoundation
 import UIKit
 
@@ -156,10 +157,14 @@ extension FloatingPiPController {
             presentationTimeStamp: CMTime(value: frameCount, timescale: 10)
         )
         frameCount += 1
+        var formatDesc: CMVideoFormatDescription?
+        CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: buffer, formatDescriptionOut: &formatDesc)
+        guard let format = formatDesc else { return }
         var sampleBuffer: CMSampleBuffer?
-        CMSampleBufferCreateForImageBuffer(
-            kCFAllocatorDefault, buffer, false, nil, nil, &timing, &sampleBuffer)
-        guard let sb = sampleBuffer else { return }
+        let createStatus = CMSampleBufferCreateReadyWithImageBuffer(
+            kCFAllocatorDefault, buffer, format, &timing, &sampleBuffer)
+        guard createStatus == noErr, let sb = sampleBuffer else { return }
         if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) {
             (arr as NSArray).forEach { entry in
                 (entry as? NSMutableDictionary)?[kCMSampleAttachmentKey_DisplayImmediately as String] = NSNumber(value: true)
