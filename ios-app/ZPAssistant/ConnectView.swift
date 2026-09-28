@@ -169,8 +169,7 @@ extension ConnectView {
                     TextField("6 位访问码", text: $code)
                         .keyboardType(.numberPad)
                         .multilineTextAlignment(.center)
-                        .font(.title2)
-                        .kerning(8)
+                        .font(.system(size: 24, weight: .semibold, design: .monospaced))
                         .foregroundColor(.navText)
                         .navField()
                     NavPrimaryButton(title: "配对",
