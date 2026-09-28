@@ -46,13 +46,7 @@ struct SessionView: View {
             }
             Button {
                 if pip.active { pip.stop() } else {
-                    pip.start(
-                        text: { [weak store] in store?.answerText ?? "" },
-                        status: { [weak store] in
-                            guard let store = store else { return "" }
-                            return store.thinking ? "生成中…" : (store.modeLabel)
-                        }
-                    )
+                    pip.start(store: store)
                 }
             } label: {
                 Image(systemName: pip.active ? "pip.exit" : "pip.enter")
