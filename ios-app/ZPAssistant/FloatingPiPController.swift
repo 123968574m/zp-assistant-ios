@@ -18,6 +18,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var pool: CVPixelBufferPool?
     private var frameCount: Int64 = 0
     private var silencePlayer: AVAudioPlayer?
+    private var interruptionObserver: NSObjectProtocol?
     private var webView: WKWebView?
     private var snapshotInFlight = false
     private var lastSentStatus = "\u{0}"
@@ -36,9 +37,12 @@ final class FloatingPiPController: NSObject, ObservableObject {
 
         // 后台保活：playback 会话 + 静音循环
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default)
+        // mixWithOthers：声明可混音，其它 App（视频会议/相机）激活语音会话时
+        // 不会打断我们，PiP 窗口因此不会被系统挂起成禁用状态
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         try? session.setActive(true)
         startSilenceLoop()
+        startInterruptionGuard()
 
         // 1) 离屏 WebView：渲染提示词面板（时钟/状态/正文）
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: renderWidth, height: renderHeight))
@@ -111,6 +115,10 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private func cleanup() {
         renderTimer?.invalidate()
         renderTimer = nil
+        if let obs = interruptionObserver {
+            NotificationCenter.default.removeObserver(obs)
+            interruptionObserver = nil
+        }
         silencePlayer?.stop()
         silencePlayer = nil
         sampleLayer?.flush()
@@ -233,9 +241,29 @@ function update(st,text){document.getElementById('st').textContent=st;var el=doc
     }
 }
 
-// MARK: - 静音保活
+// MARK: - 音频会话守卫
 
 extension FloatingPiPController {
+
+    fileprivate func startInterruptionGuard() {
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self = self else { return }
+            let raw = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue
+            if raw == AVAudioSession.InterruptionType.began.rawValue {
+                // 立即重新激活会话并恢复静音播放，把 PiP 从挂起边缘拉回来
+                try? AVAudioSession.sharedInstance().setActive(true)
+                self.silencePlayer?.play()
+            } else {
+                let option = (note.userInfo?[AVAudioSessionInterruptionOptionsKey] as? NSNumber)?.uintValue
+                if option == AVAudioSession.InterruptionOptions.shouldResume.rawValue {
+                    self.silencePlayer?.play()
+                }
+            }
+        }
+    }
 
     fileprivate func startSilenceLoop() {
         let sampleRate = 8000
