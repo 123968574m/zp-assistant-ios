@@ -8,6 +8,7 @@ struct ZPAssistantApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(store)
+                .preferredColorScheme(.dark)
         }
     }
 }
@@ -17,6 +18,7 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
+            Color.navBg.ignoresSafeArea()
             if store.connState == .connected {
                 SessionView()
                 // ZP 助手悬浮球：已连接时常驻，点开展开提示词面板
