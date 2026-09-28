@@ -39,6 +39,8 @@ targets:
           - UIInterfaceOrientationPortrait
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        UIBackgroundModes:
+          - audio
         NSCameraUsageDescription: 需要相机扫描桌面端显示的连接二维码
         ITSAppUsesNonExemptEncryption: false
 schemes:
