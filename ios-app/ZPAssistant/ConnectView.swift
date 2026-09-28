@@ -110,7 +110,20 @@ extension ConnectView {
 
     private var cloudForm: some View {
         VStack(spacing: 14) {
-            infoCard("桌面端开启「云端中继」后，设备会出现在下方列表；点选设备并输入 6 位访问码即可配对，无需同一 Wi-Fi。")
+            HStack {
+                infoCard("桌面端开启「云端中继」后，设备会出现在下方列表；点选设备并输入 6 位访问码即可配对，无需同一 Wi-Fi。")
+                Button {
+                    PiPDebug.log("云端：手动刷新设备列表")
+                    store.connectCloud()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .foregroundColor(.navAccent)
+                        .frame(width: 34, height: 34)
+                        .background(Color.navSurface)
+                        .cornerRadius(10)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.navBorder, lineWidth: 1))
+                }
+            }
 
             if store.connState == .connecting && store.hosts.isEmpty {
                 HStack(spacing: 8) {
