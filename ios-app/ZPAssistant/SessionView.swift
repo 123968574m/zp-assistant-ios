@@ -45,13 +45,11 @@ struct SessionView: View {
                     .font(.caption).foregroundColor(.navMuted)
             }
             Button {
-                if pip.active { pip.stop() } else {
-                    pip.start(store: store)
-                }
+                pip.toggleFloating(store: store)
             } label: {
-                Image(systemName: pip.active ? "pip.exit" : "pip.enter")
+                Image(systemName: pip.floatingEnabled ? "pip.exit" : "pip.enter")
                     .font(.title3)
-                    .foregroundColor(pip.active ? .navAccent : .navMuted)
+                    .foregroundColor(pip.floatingEnabled ? .navAccent : .navMuted)
                     .frame(width: 38, height: 38)
                     .background(Color.navSurface)
                     .cornerRadius(10)
