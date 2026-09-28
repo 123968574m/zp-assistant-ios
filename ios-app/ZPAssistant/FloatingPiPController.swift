@@ -19,6 +19,9 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var frameCount: Int64 = 0
     private var silencePlayer: AVAudioPlayer?
     private var interruptionObserver: NSObjectProtocol?
+    private var userStopRequested = false
+    private var restartAttempts = 0
+    private var restartTimer: Timer?
     private var webView: WKWebView?
     private var snapshotInFlight = false
     private var lastSentStatus = "\u{0}"
@@ -108,6 +111,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
     }
 
     func stop() {
+        userStopRequested = true
         pipController?.stopPictureInPicture()
         cleanup()
     }
@@ -119,6 +123,10 @@ final class FloatingPiPController: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(obs)
             interruptionObserver = nil
         }
+        restartTimer?.invalidate()
+        restartTimer = nil
+        userStopRequested = false
+        restartAttempts = 0
         silencePlayer?.stop()
         silencePlayer = nil
         sampleLayer?.flush()
@@ -253,16 +261,21 @@ extension FloatingPiPController {
             guard let self = self else { return }
             let raw = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue
             if raw == AVAudioSession.InterruptionType.began.rawValue {
-                // 立即重新激活会话并恢复静音播放，把 PiP 从挂起边缘拉回来
-                try? AVAudioSession.sharedInstance().setActive(true)
-                self.silencePlayer?.play()
-            } else {
-                let option = (note.userInfo?["AVAudioSessionInterruptionOptionKey"] as? NSNumber)?.uintValue
-                if option == AVAudioSession.InterruptionOptions.shouldResume.rawValue {
-                    self.silencePlayer?.play()
-                }
+                // 其它 App 激活语音会话：立即重新声明混音会话并恢复静音播放，
+                // 防止 PiP 被系统挂起成禁用状态
+                self.reassertSession()
+            } else if raw == AVAudioSession.InterruptionType.ended.rawValue {
+                self.reassertSession()
             }
         }
+    }
+
+    /// 重新声明可混音会话并恢复静音播放（打断开始/结束都会调用）
+    fileprivate func reassertSession() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+        try? session.setActive(true)
+        silencePlayer?.play()
     }
 
     fileprivate func startSilenceLoop() {
@@ -322,10 +335,35 @@ extension FloatingPiPController: AVPictureInPictureSampleBufferPlaybackDelegate 
 
 extension FloatingPiPController: AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        DispatchQueue.main.async { self.active = true }
+        DispatchQueue.main.async {
+            self.active = true
+            self.restartAttempts = 0
+        }
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        cleanup()
+        DispatchQueue.main.async {
+            if self.userStopRequested {
+                self.cleanup()
+                return
+            }
+            // 非用户关闭（被系统/其它 App 的画中画顶掉）：自动重拉
+            self.active = false
+            self.scheduleRestart()
+        }
+    }
+
+    private func scheduleRestart() {
+        restartTimer?.invalidate()
+        guard restartAttempts < 8 else {
+            cleanup()
+            return
+        }
+        restartAttempts += 1
+        restartTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
+            guard let self = self, let pip = self.pipController else { return }
+            self.reassertSession()
+            pip.startPictureInPicture()
+        }
     }
 }
