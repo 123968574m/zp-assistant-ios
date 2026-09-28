@@ -21,6 +21,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var userStopRequested = false
     private var restartAttempts = 0
     private var restartTimer: Timer?
+    private var pipPossibleObservation: NSKeyValueObservation?
 
     func start(store: SessionStore) {
         guard !active else { return }
@@ -47,9 +48,13 @@ final class FloatingPiPController: NSObject, ObservableObject {
         hosting.didMove(toParent: callVC)
         self.callVC = callVC
 
-        // 2) 通话源视图（挂到窗口外，仅作注册用）
-        let sourceView = UIView(frame: CGRect(x: -4, y: -4, width: 2, height: 2))
-        window.addSubview(sourceView)
+        // 2) 通话源视图：AVKit 要求源视图必须在屏幕上（离屏视图会静默拒绝
+        //    启动画中画），用全屏透明视图垫底，不拦截任何交互
+        let sourceView = UIView(frame: window.bounds)
+        sourceView.backgroundColor = .clear
+        sourceView.isUserInteractionEnabled = false
+        sourceView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        window.insertSubview(sourceView, at: 0)
         self.sourceView = sourceView
 
         // 3) 视频通话型 PiP
@@ -61,7 +66,18 @@ final class FloatingPiPController: NSObject, ObservableObject {
         pip.canStartPictureInPictureAutomaticallyFromInline = true
         pip.delegate = self
         pipController = pip
-        pip.startPictureInPicture()
+        // isPictureInPicturePossible 变为 true 后再启动（过早启动会被 AVKit 拒绝）
+        pipPossibleObservation = pip.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] pip, change in
+            if change.newValue == true {
+                DispatchQueue.main.async {
+                    guard let self = self, !self.active, !self.userStopRequested else { return }
+                    pip.startPictureInPicture()
+                }
+            }
+        }
+        if pip.isPictureInPicturePossible {
+            pip.startPictureInPicture()
+        }
     }
 
     func stop() {
@@ -77,6 +93,8 @@ final class FloatingPiPController: NSObject, ObservableObject {
         }
         restartTimer?.invalidate()
         restartTimer = nil
+        pipPossibleObservation?.invalidate()
+        pipPossibleObservation = nil
         userStopRequested = false
         restartAttempts = 0
         silencePlayer?.stop()
@@ -209,6 +227,13 @@ extension FloatingPiPController: AVPictureInPictureControllerDelegate {
         DispatchQueue.main.async {
             self.active = true
             self.restartAttempts = 0
+        }
+    }
+
+    func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController,
+                                    failedToStartPictureInPictureWithError error: Error) {
+        DispatchQueue.main.async {
+            if !self.userStopRequested { self.scheduleRestart() }
         }
     }
 
