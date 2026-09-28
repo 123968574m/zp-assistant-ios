@@ -54,8 +54,8 @@ final class FloatingPiPController: NSObject, ObservableObject {
         }
 
         let pip = AVPictureInPictureController(contentSource: source)
-        pip?.canStartPictureInPictureAutomaticallyFromInline = true
-        pip?.delegate = self
+        pip.canStartPictureInPictureAutomaticallyFromInline = true
+        pip.delegate = self
         pipController = pip
 
         // 像素缓冲池
@@ -71,7 +71,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
 
         frameCount = 0
         renderFrame()
-        pip?.startPictureInPicture()
+        pip.startPictureInPicture()
 
         // 10fps 定时重绘（后台靠静音保活持续触发）
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -248,6 +248,13 @@ extension FloatingPiPController: AVPictureInPictureSampleBufferPlaybackDelegate 
 
     func pictureInPictureControllerTimeRange(_ pictureInPictureController: AVPictureInPictureController,
                                              didChange timeRange: CMTimeRange) { }
+
+    func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
+        CMTimeRange(
+            start: CMTime(value: CMTimeValue(max(0, frameCount - 1)), timescale: 10),
+            duration: CMTime(value: 1, timescale: 10)
+        )
+    }
 
     func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
         false
