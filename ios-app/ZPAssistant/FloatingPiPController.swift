@@ -26,6 +26,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var inForeground = true
     private var restartAttempts = 0
     private var restartTimer: Timer?
+    private var collapseFixTimer: Timer?
     private weak var hostStore: SessionStore?
 
     /// 悬浮模式开关：开 = 建 PiP + 自动回桌面；关 = 关窗清理
@@ -59,6 +60,10 @@ final class FloatingPiPController: NSObject, ObservableObject {
         startSilenceLoop()
         startInterruptionGuard()
         startAppStateObservers()
+        // 连接断开（手动断开/掉线/对方离线）时主动关闭小窗
+        store.onDisconnected = { [weak self] in
+            self?.handleConnectionLost()
+        }
 
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene }).first?.windows.first(where: { $0.isKeyWindow }) else {
@@ -119,6 +124,8 @@ final class FloatingPiPController: NSObject, ObservableObject {
         }
         restartTimer?.invalidate()
         restartTimer = nil
+        collapseFixTimer?.invalidate()
+        collapseFixTimer = nil
         userStopRequested = false
         suppressRestart = false
         inForeground = true
@@ -207,6 +214,16 @@ extension FloatingPiPController {
         }
     }
 
+    /// 连接断开：关小窗 + 退出悬浮模式
+    fileprivate func handleConnectionLost() {
+        guard floatingEnabled else { return }
+        PiPDebug.log("连接已断开：关闭小窗并退出悬浮模式")
+        floatingEnabled = false
+        userStopRequested = true
+        pipController?.stopPictureInPicture()
+        cleanup()
+    }
+
     fileprivate func reassertSession() {
         applyAudioSession()
         silencePlayer?.play()
@@ -293,13 +310,20 @@ extension FloatingPiPController: AVPictureInPictureControllerDelegate {
                                     didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
         // 小窗被折叠成贴边小条时，系统请求的渲染尺寸会骤缩——主动重开
         PiPDebug.log("渲染尺寸：\(newRenderSize.width)x\(newRenderSize.height)")
-        if newRenderSize.width < 120 && floatingEnabled && !suppressRestart && !inForeground {
-            PiPDebug.log("检测到折叠，1.2s 后主动重开")
-            restartTimer?.invalidate()
-            restartTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
+        if newRenderSize.width < 120 && floatingEnabled && !suppressRestart && !inForeground && active {
+            // 保持小窗始终展开：检测到折叠立即重启小窗
+            PiPDebug.log("检测到折叠，0.25s 后重启小窗")
+            collapseFixTimer?.invalidate()
+            collapseFixTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
                 guard let self = self, self.floatingEnabled, let pip = self.pipController else { return }
-                self.reassertSession()
-                pip.startPictureInPicture()
+                self.suppressRestart = true
+                pip.stopPictureInPicture()
+                Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+                    guard let self = self, self.floatingEnabled, let pip = self.pipController else { return }
+                    self.suppressRestart = false
+                    self.reassertSession()
+                    pip.startPictureInPicture()
+                }
             }
         }
     }
