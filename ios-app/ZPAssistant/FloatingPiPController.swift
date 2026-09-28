@@ -257,7 +257,7 @@ extension FloatingPiPController {
                 try? AVAudioSession.sharedInstance().setActive(true)
                 self.silencePlayer?.play()
             } else {
-                let option = (note.userInfo?[AVAudioSessionInterruptionOptionsKey] as? NSNumber)?.uintValue
+                let option = (note.userInfo?["AVAudioSessionInterruptionOptionKey"] as? NSNumber)?.uintValue
                 if option == AVAudioSession.InterruptionOptions.shouldResume.rawValue {
                     self.silencePlayer?.play()
                 }
