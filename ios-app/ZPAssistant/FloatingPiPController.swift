@@ -3,11 +3,15 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-/// 系统级悬浮 —— 视频通话型画中画，全流程埋调试日志（🐞 查看）。
+/// 系统级悬浮 —— 视频通话型画中画。
+/// 交互模型：悬浮模式开启时，小窗只存在于"应用在后台"期间——
+///   点悬浮按钮 → 自动回桌面（小窗出现）→ 回到应用（小窗自动关闭）→ 再去后台（自动再开）。
+/// 若小窗被系统折叠成贴边小条，检测到尺寸骤缩后会主动重开。
 final class FloatingPiPController: NSObject, ObservableObject {
     static let shared = FloatingPiPController()
 
-    @Published var active = false
+    @Published var active = false          // 小窗当前是否显示
+    @Published var floatingEnabled = false // 悬浮模式开关（用户意图）
 
     private var pipController: AVPictureInPictureController?
     private var contentSource: AVPictureInPictureController.ContentSource?
@@ -15,32 +19,53 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var sourceView: UIView?
     private var silencePlayer: AVAudioPlayer?
     private var interruptionObserver: NSObjectProtocol?
+    private var foregroundObserver: NSObjectProtocol?
+    private var backgroundObserver: NSObjectProtocol?
     private var userStopRequested = false
+    private var suppressRestart = false
     private var restartAttempts = 0
     private var restartTimer: Timer?
-    private var pipPossibleObservation: NSKeyValueObservation?
+    private weak var hostStore: SessionStore?
 
-    func start(store: SessionStore) {
-        guard !active else { PiPDebug.log("已在悬浮中，忽略重复启动"); return }
-        userStopRequested = false
+    /// 悬浮模式开关：开 = 建 PiP + 自动回桌面；关 = 关窗清理
+    func toggleFloating(store: SessionStore) {
+        if floatingEnabled {
+            PiPDebug.log("悬浮模式：关闭")
+            floatingEnabled = false
+            userStopRequested = true
+            pipController?.stopPictureInPicture()
+            cleanup()
+        } else {
+            PiPDebug.log("悬浮模式：开启（0.35s 后自动回桌面）")
+            floatingEnabled = true
+            hostStore = store
+            buildPiP(store: store)
+            // 自动回到桌面，小窗随应用进入后台自动呈现
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                UIApplication.shared.perform(Selector(("suspend")))
+            }
+        }
+    }
+
+    private func buildPiP(store: SessionStore) {
+        guard AVPictureInPictureController.isPictureInPictureSupported() else {
+            PiPDebug.log("错误：设备不支持 PiP")
+            return
+        }
         restartAttempts = 0
-
-        let supported = AVPictureInPictureController.isPictureInPictureSupported()
-        PiPDebug.log("启动 PiP：iOS \(UIDevice.current.systemVersion)，supported=\(supported)")
-        guard supported else { PiPDebug.log("错误：此设备不支持 PiP"); return }
-
+        suppressRestart = false
         applyAudioSession()
         startSilenceLoop()
         startInterruptionGuard()
+        startAppStateObservers()
 
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene }).first?.windows.first(where: { $0.isKeyWindow }) else {
             PiPDebug.log("错误：找不到 keyWindow")
             return
         }
-        PiPDebug.log("keyWindow OK：\(Int(window.bounds.width))x\(Int(window.bounds.height))")
 
-        // 1) 悬浮内容：原生 SwiftUI 提示词面板
+        // 悬浮内容：原生 SwiftUI 提示词面板
         let callVC = AVPictureInPictureVideoCallViewController()
         callVC.preferredContentSize = CGSize(width: 720, height: 405)
         let hosting = UIHostingController(rootView: FloatingPanelView().environmentObject(store))
@@ -51,18 +76,15 @@ final class FloatingPiPController: NSObject, ObservableObject {
         callVC.view.addSubview(hosting.view)
         hosting.didMove(toParent: callVC)
         self.callVC = callVC
-        PiPDebug.log("内容面板 OK（SwiftUI 720x405）")
 
-        // 2) 通话源视图：AVKit 要求源视图必须在屏幕上，用全屏透明视图垫底
+        // 通话源视图：全屏透明垫底（AVKit 要求源视图在屏）
         let sourceView = UIView(frame: window.bounds)
         sourceView.backgroundColor = .clear
         sourceView.isUserInteractionEnabled = false
         sourceView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         window.insertSubview(sourceView, at: 0)
         self.sourceView = sourceView
-        PiPDebug.log("源视图 OK（全屏透明垫底，insertSubview at 0）")
 
-        // 3) 视频通话型 PiP
         let source = AVPictureInPictureController.ContentSource(
             activeVideoCallSourceView: sourceView,
             contentViewController: callVC)
@@ -71,32 +93,11 @@ final class FloatingPiPController: NSObject, ObservableObject {
         pip.canStartPictureInPictureAutomaticallyFromInline = true
         pip.delegate = self
         pipController = pip
-        PiPDebug.log("PiP 控制器 OK，isPictureInPicturePossible=\(pip.isPictureInPicturePossible)")
-
-        // isPictureInPicturePossible 变为 true 后再启动
-        pipPossibleObservation = pip.observe(\.isPictureInPicturePossible, options: [.new]) { pip, change in
-            if change.newValue == true {
-                DispatchQueue.main.async {
-                    PiPDebug.log("possible=true，调用 startPictureInPicture")
-                    pip.startPictureInPicture()
-                }
-            }
-        }
-        if pip.isPictureInPicturePossible {
-            PiPDebug.log("初始即 possible=true，调用 startPictureInPicture")
-            pip.startPictureInPicture()
-        } else {
-            PiPDebug.log("等待 possible 变为 true…（10s 未变则重试）")
-            restartTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
-                guard let self = self, !self.active else { return }
-                PiPDebug.log("10s 超时仍未 possible，重试一轮")
-                self.scheduleRestart()
-            }
-        }
+        PiPDebug.log("PiP 构建完成，等应用进入后台自动呈现")
     }
 
     func stop() {
-        PiPDebug.log("用户主动关闭悬浮")
+        floatingEnabled = false
         userStopRequested = true
         pipController?.stopPictureInPicture()
         cleanup()
@@ -107,11 +108,18 @@ final class FloatingPiPController: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(obs)
             interruptionObserver = nil
         }
+        if let obs = foregroundObserver {
+            NotificationCenter.default.removeObserver(obs)
+            foregroundObserver = nil
+        }
+        if let obs = backgroundObserver {
+            NotificationCenter.default.removeObserver(obs)
+            backgroundObserver = nil
+        }
         restartTimer?.invalidate()
         restartTimer = nil
-        pipPossibleObservation?.invalidate()
-        pipPossibleObservation = nil
         userStopRequested = false
+        suppressRestart = false
         restartAttempts = 0
         silencePlayer?.stop()
         silencePlayer = nil
@@ -122,7 +130,36 @@ final class FloatingPiPController: NSObject, ObservableObject {
         contentSource = nil
         pipController = nil
         DispatchQueue.main.async { self.active = false }
-        PiPDebug.log("资源已清理")
+    }
+}
+
+// MARK: - 前后台联动
+
+extension FloatingPiPController {
+
+    fileprivate func startAppStateObservers() {
+        // 回到应用：主动关闭小窗（bug1）
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.floatingEnabled, self.active else { return }
+            PiPDebug.log("回应用：关闭小窗")
+            self.suppressRestart = true
+            self.pipController?.stopPictureInPicture()
+        }
+        // 去后台：主动拉起小窗
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.floatingEnabled,
+                  let pip = self.pipController, !self.active else { return }
+            PiPDebug.log("去后台：拉起小窗")
+            self.suppressRestart = false
+            self.reassertSession()
+            pip.startPictureInPicture()
+        }
     }
 }
 
@@ -130,22 +167,16 @@ final class FloatingPiPController: NSObject, ObservableObject {
 
 extension FloatingPiPController {
 
-    fileprivate func applyAudioSession() {
+    private func applyAudioSession() {
         let session = AVAudioSession.sharedInstance()
-        // 视频通话语义 + 可混音：不被其它 App 的媒体播放/语音会话打断
         do {
             try session.setCategory(.playAndRecord, mode: .videoChat, options: [.mixWithOthers])
             try session.setActive(true)
             PiPDebug.log("音频会话 OK：playAndRecord/videoChat/mix")
         } catch {
-            PiPDebug.log("playAndRecord 激活失败：\(error.localizedDescription)，退回 playback")
-            do {
-                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-                try session.setActive(true)
-                PiPDebug.log("音频会话 OK：playback/mix")
-            } catch {
-                PiPDebug.log("错误：playback 也失败 \(error.localizedDescription)")
-            }
+            PiPDebug.log("playAndRecord 失败：\(error.localizedDescription)，退回 playback")
+            try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try? session.setActive(true)
         }
     }
 
@@ -157,7 +188,7 @@ extension FloatingPiPController {
             guard let self = self else { return }
             let raw = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue
             let kind = raw == AVAudioSession.InterruptionType.began.rawValue ? "began" : "ended"
-            PiPDebug.log("音频打断：\(kind)，重新声明会话")
+            PiPDebug.log("音频打断：\(kind)")
             self.reassertSession()
         }
     }
@@ -189,7 +220,7 @@ extension FloatingPiPController {
         silencePlayer?.numberOfLoops = -1
         silencePlayer?.volume = 0.01
         let ok = silencePlayer?.play() ?? false
-        PiPDebug.log("静音保活播放：\(ok ? "OK" : "失败")")
+        PiPDebug.log("静音保活：\(ok ? "OK" : "失败")")
     }
 }
 
@@ -240,14 +271,30 @@ struct FloatingPanelView: View {
     }
 }
 
-// MARK: - PiP 委托（自动重拉）
+// MARK: - PiP 委托（折叠检测 + 自动重拉）
 
 extension FloatingPiPController: AVPictureInPictureControllerDelegate {
+
+    func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController,
+                                    didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
+        // 小窗被折叠成贴边小条时，系统请求的渲染尺寸会骤缩——主动重开
+        PiPDebug.log("渲染尺寸：\(newRenderSize.width)x\(newRenderSize.height)")
+        if newRenderSize.width < 120 && floatingEnabled && !suppressRestart {
+            PiPDebug.log("检测到折叠，1.2s 后主动重开")
+            restartTimer?.invalidate()
+            restartTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
+                guard let self = self, self.floatingEnabled, let pip = self.pipController else { return }
+                self.reassertSession()
+                pip.startPictureInPicture()
+            }
+        }
+    }
+
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         DispatchQueue.main.async {
             self.active = true
             self.restartAttempts = 0
-            PiPDebug.log("PiP 已启动 ✓")
+            PiPDebug.log("小窗已显示")
         }
     }
 
@@ -255,17 +302,23 @@ extension FloatingPiPController: AVPictureInPictureControllerDelegate {
                                     failedToStartPictureInPictureWithError error: Error) {
         PiPDebug.log("错误：启动失败 \(error.localizedDescription)")
         DispatchQueue.main.async {
-            if !self.userStopRequested { self.scheduleRestart() }
+            if !self.userStopRequested && !self.suppressRestart { self.scheduleRestart() }
         }
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         DispatchQueue.main.async {
-            PiPDebug.log("PiP 停止（用户关闭=\(self.userStopRequested)）")
             if self.userStopRequested {
+                PiPDebug.log("小窗关闭（用户关闭）")
                 self.cleanup()
                 return
             }
+            if self.suppressRestart {
+                self.active = false
+                PiPDebug.log("小窗关闭（回到前台）")
+                return
+            }
+            PiPDebug.log("小窗意外终止，自动重拉")
             self.active = false
             self.scheduleRestart()
         }
@@ -274,14 +327,13 @@ extension FloatingPiPController: AVPictureInPictureControllerDelegate {
     private func scheduleRestart() {
         restartTimer?.invalidate()
         guard restartAttempts < 8 else {
-            PiPDebug.log("重试次数用尽，停止自动重拉")
+            PiPDebug.log("重试次数用尽，停止重拉")
             cleanup()
             return
         }
         restartAttempts += 1
-        PiPDebug.log("1s 后自动重拉（第 \(restartAttempts) 次）")
         restartTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
-            guard let self = self, let pip = self.pipController else { return }
+            guard let self = self, self.floatingEnabled, let pip = self.pipController else { return }
             self.reassertSession()
             pip.startPictureInPicture()
         }
