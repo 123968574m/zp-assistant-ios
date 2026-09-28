@@ -33,7 +33,7 @@ struct SessionView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("领航者").font(.subheadline).fontWeight(.bold).foregroundColor(.navText)
                 HStack(spacing: 6) {
-                    Circle().fill(store.connState == .connected ? .navGreen : .navRed)
+                    Circle().fill(store.connState == .connected ? Color.navGreen : Color.navRed)
                         .frame(width: 6, height: 6)
                     Text(store.modeLabel.isEmpty ? "未同步模式" : store.modeLabel)
                         .font(.caption).foregroundColor(.navMuted)
