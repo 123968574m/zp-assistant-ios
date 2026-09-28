@@ -23,6 +23,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var backgroundObserver: NSObjectProtocol?
     private var userStopRequested = false
     private var suppressRestart = false
+    private var inForeground = true
     private var restartAttempts = 0
     private var restartTimer: Timer?
     private weak var hostStore: SessionStore?
@@ -120,6 +121,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
         restartTimer = nil
         userStopRequested = false
         suppressRestart = false
+        inForeground = true
         restartAttempts = 0
         silencePlayer?.stop()
         silencePlayer = nil
@@ -138,15 +140,21 @@ final class FloatingPiPController: NSObject, ObservableObject {
 extension FloatingPiPController {
 
     fileprivate func startAppStateObservers() {
-        // 回到应用：主动关闭小窗（bug1）
+        // 回到应用：主动关闭小窗（bug1）。前后台切换过程中 stop 可能被系统忽略，
+        // 因此立即关一次 + 0.4s 后补关一次。
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.floatingEnabled, self.active else { return }
+            guard let self = self, self.floatingEnabled else { return }
             PiPDebug.log("回应用：关闭小窗")
-            self.suppressRestart = true
-            self.pipController?.stopPictureInPicture()
+            self.inForeground = true
+            self.closeWindowForForeground()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self = self, self.inForeground, self.floatingEnabled else { return }
+                PiPDebug.log("回应用：0.4s 补关")
+                self.pipController?.stopPictureInPicture()
+            }
         }
         // 去后台：主动拉起小窗
         backgroundObserver = NotificationCenter.default.addObserver(
@@ -154,12 +162,18 @@ extension FloatingPiPController {
             object: nil, queue: .main
         ) { [weak self] _ in
             guard let self = self, self.floatingEnabled,
-                  let pip = self.pipController, !self.active else { return }
+                  let pip = self.pipController else { return }
             PiPDebug.log("去后台：拉起小窗")
+            self.inForeground = false
             self.suppressRestart = false
             self.reassertSession()
             pip.startPictureInPicture()
         }
+    }
+
+    private func closeWindowForForeground() {
+        suppressRestart = true
+        pipController?.stopPictureInPicture()
     }
 }
 
@@ -279,7 +293,7 @@ extension FloatingPiPController: AVPictureInPictureControllerDelegate {
                                     didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
         // 小窗被折叠成贴边小条时，系统请求的渲染尺寸会骤缩——主动重开
         PiPDebug.log("渲染尺寸：\(newRenderSize.width)x\(newRenderSize.height)")
-        if newRenderSize.width < 120 && floatingEnabled && !suppressRestart {
+        if newRenderSize.width < 120 && floatingEnabled && !suppressRestart && !inForeground {
             PiPDebug.log("检测到折叠，1.2s 后主动重开")
             restartTimer?.invalidate()
             restartTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
@@ -295,6 +309,12 @@ extension FloatingPiPController: AVPictureInPictureControllerDelegate {
             self.active = true
             self.restartAttempts = 0
             PiPDebug.log("小窗已显示")
+            if self.inForeground && self.floatingEnabled {
+                // 前台期间系统自动弹出的：立即关闭
+                PiPDebug.log("前台出现小窗，立即关闭")
+                self.suppressRestart = true
+                pictureInPictureController.stopPictureInPicture()
+            }
         }
     }
 
@@ -333,7 +353,8 @@ extension FloatingPiPController: AVPictureInPictureControllerDelegate {
         }
         restartAttempts += 1
         restartTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
-            guard let self = self, self.floatingEnabled, let pip = self.pipController else { return }
+            guard let self = self, self.floatingEnabled, !self.inForeground,
+                  let pip = self.pipController else { return }
             self.reassertSession()
             pip.startPictureInPicture()
         }
