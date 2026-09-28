@@ -1,0 +1,52 @@
+# 云构建 ZP助手 iOS IPA（无需 Mac）
+# 触发：Actions 页面手动 Run workflow，或推送 ios-v* 标签
+# 产物：未签名 IPA（Actions 页面 Artifacts 下载），下载后自行企业重签名
+name: Build iOS IPA
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "ios-v*"
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios-app
+        run: xcodegen generate
+
+      - name: Archive (unsigned)
+        working-directory: ios-app
+        run: |
+          xcodebuild -project ZPAssistant.xcodeproj \
+            -scheme ZPAssistant \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/ZPAssistant.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned IPA
+        working-directory: ios-app
+        run: |
+          APP_PATH=$(find build/ZPAssistant.xcarchive/Products -name "*.app" -maxdepth 3 | head -n 1)
+          echo "App bundle: $APP_PATH"
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -qry ZPAssistant-unsigned.ipa Payload
+          ls -lh ZPAssistant-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZPAssistant-unsigned-ipa
+          path: ios-app/build/ZPAssistant-unsigned.ipa
+          retention-days: 30
