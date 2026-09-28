@@ -137,8 +137,6 @@ final class FloatingPiPController: NSObject, ObservableObject {
                let json = String(data: data, encoding: .utf8) {
                 webView.evaluateJavaScript("update.apply(null, \(json))", completionHandler: nil)
             }
-        } else {
-            webView.evaluateJavaScript("tick()", completionHandler: nil)
         }
     }
 
@@ -222,15 +220,12 @@ body{margin:0;width:720px;height:405px;background:#0c0e12;color:#e8e8ec;font-fam
 .bar{display:flex;justify-content:space-between;align-items:center;padding:8px 20px;background:linear-gradient(90deg,#123c6e,#0c0e12);border-bottom:1px solid #2a2f3a}
 .brand{color:#4dabf7;font-weight:700;font-size:19px;letter-spacing:1px}
 #st{color:#ffb340;font-size:15px;margin-left:auto;margin-right:18px}
-.clock{color:#fff;font-size:25px;font-weight:700;font-variant-numeric:tabular-nums}
+
 #text{padding:14px 22px;font-size:29px;line-height:1.5;white-space:pre-wrap;word-break:break-all;height:316px;overflow:hidden}
 </style></head><body>
-<div class="bar"><span class="brand">领航者</span><span id="st"></span><span class="clock" id="clock">--:--:--</span></div>
+<div class="bar"><span class="brand">领航者</span><span id="st"></span></div>
 <div id="text">等待桌面端生成提示词…</div>
 <script>
-function pad(n){return (n<10?'0':'')+n}
-function tick(){var d=new Date();document.getElementById('clock').textContent=pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())}
-setInterval(tick,200);tick();
 var EMPTY='等待桌面端生成提示词…';
 function update(st,text){document.getElementById('st').textContent=st;var el=document.getElementById('text');el.textContent=text||EMPTY;el.scrollTop=el.scrollHeight}
 </script></body></html>
