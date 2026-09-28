@@ -170,7 +170,7 @@ extension ConnectView {
                         .keyboardType(.numberPad)
                         .multilineTextAlignment(.center)
                         .font(.title2)
-                        .tracking(8)
+                        .kerning(8)
                         .foregroundColor(.navText)
                         .navField()
                     NavPrimaryButton(title: "配对",
