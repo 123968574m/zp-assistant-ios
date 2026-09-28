@@ -1,6 +1,12 @@
 import Foundation
 import SocketIO
 
+/// 云端中继上的在线设备
+struct RelayHost: Identifiable, Equatable {
+    let id: String
+    let name: String
+}
+
 /// 与桌面端「手机互联」Socket.IO 服务的连接与状态。
 /// 协议与手机网页版一致：
 ///   下行: response_mode / current_model / feature_sync / ai_thinking
@@ -40,6 +46,11 @@ final class SessionStore: ObservableObject {
     @Published var thinking: Bool = false
     @Published var answerText: String = ""
     @Published var features = FeatureFlags()
+    @Published var hosts: [RelayHost] = []
+    @Published var bindError: String = ""
+
+    enum Mode { case lan, cloud }
+    private var mode: Mode = .lan
 
     private var manager: SocketManager?
     private var socket: SocketIOClient?
@@ -88,7 +99,33 @@ final class SessionStore: ObservableObject {
             self.connState = .disconnected
             self.answerText = ""
             self.thinking = false
+            self.hosts = []
+            self.bindError = ""
         }
+    }
+
+    /// 云端中继（非局域网）：连 navway.cc.cd 的 /phone 命名空间
+    func connectCloud() {
+        disconnect()
+        mode = .cloud
+        guard let url = URL(string: "https://navway.cc.cd") else {
+            DispatchQueue.main.async { self.connState = .failed }
+            return
+        }
+        lastSeq = 0
+        let mgr = SocketManager(socketURL: url, config: [.log(false), .compress])
+        manager = mgr
+        let sk = mgr.socket(forNamespace: "/phone")
+        socket = sk
+        bind(sk)
+        setMain(.connecting) { self.connState = $0 }
+        sk.connect()
+    }
+
+    /// 配对云端设备（6 位访问码）
+    func bindHost(hostId: String, code: String) {
+        setMain("") { self.bindError = $0 }
+        socket?.emit("bind", ["hostId": hostId, "code": code])
     }
 
     func send(action: String) {
@@ -99,9 +136,12 @@ final class SessionStore: ObservableObject {
         sk.on(clientEvent: .connect) { [weak self] _, _ in
             guard let self = self else { return }
             self.lastSeq = 0
-            self.setMain(.connected) { self.connState = $0 }
-            // 连上后向桌面端要一次当前回答全文，补齐掉线窗口内丢失的分片
-            sk.emit("answer_resync")
+            if self.mode == .lan {
+                self.setMain(.connected) { self.connState = $0 }
+                // 连上后向桌面端要一次当前回答全文，补齐掉线窗口内丢失的分片
+                sk.emit("answer_resync")
+            }
+            // 云端模式在 bound 之后才算连上
         }
         sk.on(clientEvent: .disconnect) { [weak self] data, _ in
             // 主动断开(reason=manual)不再重连；其余交给 .reconnects(true)
@@ -153,6 +193,34 @@ final class SessionStore: ObservableObject {
             let nextSeq = obj["nextSeq"] as? Int ?? 1
             let isThinking = obj["thinking"] as? Bool ?? false
             self?.applyResync(text: text, nextSeq: nextSeq, thinking: isThinking)
+        }
+        // ---- 云端中继专属 ----
+        sk.on("host_list") { [weak self] data, _ in
+            guard let obj = data.first as? [String: Any],
+                  let list = obj["hosts"] as? [[String: Any]] else { return }
+            let hosts = list.compactMap { entry -> RelayHost? in
+                guard let id = entry["id"] as? String else { return nil }
+                let name = entry["name"] as? String ?? "未命名电脑"
+                return RelayHost(id: id, name: name)
+            }
+            self?.setMain(hosts) { self?.hosts = $0 }
+        }
+        sk.on("bound") { [weak self] _, _ in
+            guard let self = self else { return }
+            self.lastSeq = 0
+            self.setMain(.connected) { self.connState = $0 }
+            sk.emit("answer_resync")
+        }
+        sk.on("bind_failed") { [weak self] data, _ in
+            guard let self = self else { return }
+            let obj = data.first as? [String: Any]
+            let msg = obj?["message"] as? String ?? "配对失败，请确认 6 位访问码"
+            self.setMain(msg) { self.bindError = $0 }
+        }
+        sk.on("host_gone") { [weak self] _, _ in
+            guard let self = self else { return }
+            self.setMain("所选设备已离线") { self.bindError = $0 }
+            self.setMain(.disconnected) { self.connState = $0 }
         }
     }
 
