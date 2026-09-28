@@ -52,6 +52,9 @@ final class SessionStore: ObservableObject {
     enum Mode { case lan, cloud }
     private var mode: Mode = .lan
 
+    /// 连接断开/失败时的回调（悬浮控制器用来关闭小窗）
+    var onDisconnected: (() -> Void)?
+
     private var manager: SocketManager?
     private var socket: SocketIOClient?
     private var lastSeq = 0
@@ -101,6 +104,7 @@ final class SessionStore: ObservableObject {
             self.thinking = false
             self.hosts = []
             self.bindError = ""
+            self.onDisconnected?()
         }
     }
 
@@ -155,6 +159,7 @@ final class SessionStore: ObservableObject {
             let msg = data.first as? String ?? "unknown"
             PiPDebug.log("socket 错误：\(msg)")
             self?.setMain(.failed) { self?.connState = $0 }
+            self?.onDisconnected?()
         }
         sk.on("response_mode") { [weak self] data, _ in
             guard let obj = data.first as? [String: Any],
@@ -229,6 +234,7 @@ final class SessionStore: ObservableObject {
             guard let self = self else { return }
             self.setMain("所选设备已离线") { self.bindError = $0 }
             self.setMain(.disconnected) { self.connState = $0 }
+            self.onDisconnected?()
         }
     }
 
