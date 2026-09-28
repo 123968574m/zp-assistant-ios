@@ -11,7 +11,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
     @Published var active = false
 
     private var sampleLayer: AVSampleBufferDisplayLayer?
-    private var pipLayer: AVPictureInPictureSampleBufferPlaybackLayer?
+    private var contentSource: AVPictureInPictureController.ContentSource?
     private var pipController: AVPictureInPictureController?
     private var renderTimer: Timer?
     private var pool: CVPixelBufferPool?
@@ -40,9 +40,10 @@ final class FloatingPiPController: NSObject, ObservableObject {
         layer.frame = CGRect(x: 0, y: 0, width: renderWidth, height: renderHeight)
         sampleLayer = layer
 
-        let source = AVPictureInPictureSampleBufferPlaybackLayer(sampleBufferDisplayLayer: layer)
-        source.playbackDelegate = self
-        pipLayer = source
+        let source = AVPictureInPictureController.ContentSource(
+            sampleBufferDisplayLayer: layer,
+            playbackDelegate: self)
+        contentSource = source
 
         // 挂到窗口外的 1x1 隐藏视图上（PiP 独立渲染窗口内容）
         if let window = UIApplication.shared.connectedScenes
@@ -94,7 +95,7 @@ final class FloatingPiPController: NSObject, ObservableObject {
         sampleLayer?.flush()
         sampleLayer?.removeFromSuperlayer()
         sampleLayer = nil
-        pipLayer = nil
+        contentSource = nil
         pipController = nil
         pool = nil
         DispatchQueue.main.async { self.active = false }
@@ -154,7 +155,8 @@ extension FloatingPiPController {
 
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 10),
-            presentationTimeStamp: CMTime(value: frameCount, timescale: 10)
+            presentationTimeStamp: CMTime(value: frameCount, timescale: 10),
+            decodeTimeStamp: CMTime.invalid
         )
         frameCount += 1
         var formatDesc: CMVideoFormatDescription?
@@ -163,7 +165,11 @@ extension FloatingPiPController {
         guard let format = formatDesc else { return }
         var sampleBuffer: CMSampleBuffer?
         let createStatus = CMSampleBufferCreateReadyWithImageBuffer(
-            kCFAllocatorDefault, buffer, format, &timing, &sampleBuffer)
+            allocator: kCFAllocatorDefault,
+            imageBuffer: buffer,
+            formatDescription: format,
+            sampleTiming: &timing,
+            sampleBufferOut: &sampleBuffer)
         guard createStatus == noErr, let sb = sampleBuffer else { return }
         if let arr = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) {
             (arr as NSArray).forEach { entry in
