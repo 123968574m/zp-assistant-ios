@@ -3,6 +3,7 @@ import SwiftUI
 /// 会话主界面：状态栏 + 提示词全文 + 远程控制按钮。
 struct SessionView: View {
     @EnvironmentObject var store: SessionStore
+    @ObservedObject private var pip = FloatingPiPController.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +25,25 @@ struct SessionView: View {
                     .font(.caption).foregroundColor(.secondary)
             }
             Spacer()
+            Button {
+                if pip.active {
+                    pip.stop()
+                } else {
+                    pip.start(
+                        text: { [weak store] in store?.answerText ?? "" },
+                        status: { [weak store] in
+                            guard let store = store else { return "" }
+                            if store.thinking { return "生成中…" }
+                            return store.modeLabel
+                        }
+                    )
+                }
+            } label: {
+                Image(systemName: pip.active ? "pip.exit" : "pip.enter")
+                    .font(.title2)
+                    .foregroundColor(pip.active ? .blue : .secondary)
+            }
+            .buttonStyle(.borderless)
             Button {
                 store.disconnect()
             } label: {
