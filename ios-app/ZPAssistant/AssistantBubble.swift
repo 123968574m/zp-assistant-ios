@@ -34,11 +34,11 @@ struct AssistantBubble: View {
     private var ball: some View {
         ZStack {
             Circle()
-                .fill(LinearGradient(colors: [Color.blue, Color.cyan],
+                .fill(LinearGradient(colors: [Color.navAccent, Color(navHex: 0x123C6E)],
                                      startPoint: .topLeading, endPoint: .bottomTrailing))
                 .shadow(radius: 4)
             VStack(spacing: 0) {
-                Text("ZP").font(.system(size: 17, weight: .bold)).foregroundColor(.white)
+                Text("航").font(.system(size: 19, weight: .bold)).foregroundColor(.white)
                 if store.thinking {
                     Circle().fill(Color.yellow).frame(width: 7, height: 7)
                 }
@@ -60,7 +60,7 @@ struct AssistantBubble: View {
     private var panel: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Text("ZP助手 · 提示词")
+                Text("领航者 · 提示词")
                     .font(.subheadline).fontWeight(.semibold)
                     .foregroundColor(.white)
                 if store.thinking {
@@ -82,7 +82,7 @@ struct AssistantBubble: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            Divider().background(Color.white.opacity(0.25))
+            Divider().background(Color.navBorder)
             ScrollViewReader { proxy in
                 ScrollView {
                     Text(displayText)
@@ -98,9 +98,9 @@ struct AssistantBubble: View {
                 }
             }
         }
-        .background(Color.black.opacity(0.86))
+        .background(Color.navBg.opacity(0.94))
         .cornerRadius(14)
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.2), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.navBorder, lineWidth: 1))
     }
 
     private var displayText: String {
