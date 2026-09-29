@@ -54,6 +54,9 @@ final class SessionStore: ObservableObject {
 
     /// 连接断开/失败时的回调（悬浮控制器用来关闭小窗）
     var onDisconnected: (() -> Void)?
+    /// 局域网健康检查地址（悬浮模式轮询用）
+    private(set) var lanHealthURL: URL?
+    var isLanMode: Bool { mode == .lan }
 
     private var manager: SocketManager?
     private var socket: SocketIOClient?
@@ -75,6 +78,7 @@ final class SessionStore: ObservableObject {
             return
         }
         lastSeq = 0
+        lanHealthURL = URL(string: "http://\(cleanHost):\(port)/__health")
         var params: [String: String] = ["room": room.trimmingCharacters(in: .whitespaces)]
         let pwd = password.trimmingCharacters(in: .whitespaces)
         if !pwd.isEmpty { params["password"] = pwd }
@@ -98,6 +102,7 @@ final class SessionStore: ObservableObject {
         socket?.removeAllHandlers()
         socket = nil
         manager = nil
+        lanHealthURL = nil
         DispatchQueue.main.async {
             self.connState = .disconnected
             self.answerText = ""
@@ -117,6 +122,7 @@ final class SessionStore: ObservableObject {
             return
         }
         lastSeq = 0
+        lanHealthURL = nil
         let mgr = SocketManager(socketURL: url, config: [.log(false), .compress])
         manager = mgr
         let sk = mgr.socket(forNamespace: "/phone")
