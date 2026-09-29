@@ -27,6 +27,9 @@ final class FloatingPiPController: NSObject, ObservableObject {
     private var restartAttempts = 0
     private var restartTimer: Timer?
     private var collapseFixTimer: Timer?
+    private var healthPollTimer: Timer?
+    private var healthFailCount = 0
+    private var healthURL: URL?
     private weak var hostStore: SessionStore?
 
     /// 悬浮模式开关：开 = 建 PiP + 自动回桌面；关 = 关窗清理
@@ -63,6 +66,11 @@ final class FloatingPiPController: NSObject, ObservableObject {
         // 连接断开（手动断开/掉线/对方离线）时主动关闭小窗
         store.onDisconnected = { [weak self] in
             self?.handleConnectionLost()
+        }
+        // 局域网模式：轮询桌面端 /__health，弥补 socket 超时检测慢的问题
+        if store.isLanMode, let url = store.lanHealthURL {
+            healthURL = url
+            startHealthPoll()
         }
 
         guard let window = UIApplication.shared.connectedScenes
@@ -126,6 +134,10 @@ final class FloatingPiPController: NSObject, ObservableObject {
         restartTimer = nil
         collapseFixTimer?.invalidate()
         collapseFixTimer = nil
+        healthPollTimer?.invalidate()
+        healthPollTimer = nil
+        healthFailCount = 0
+        healthURL = nil
         userStopRequested = false
         suppressRestart = false
         inForeground = true
@@ -212,6 +224,34 @@ extension FloatingPiPController {
             PiPDebug.log("音频打断：\(kind)")
             self.reassertSession()
         }
+    }
+
+    /// 局域网健康轮询：连续 2 次失败即判定桌面端断开
+    fileprivate func startHealthPoll() {
+        healthPollTimer?.invalidate()
+        healthFailCount = 0
+        let timer = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.floatingEnabled, let url = self.healthURL else { return }
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 2.5
+            URLSession.shared.dataTask(with: req) { [weak self] _, response, error in
+                let ok = (error == nil) && ((response as? HTTPURLResponse)?.statusCode == 200)
+                DispatchQueue.main.async {
+                    guard let self = self, self.floatingEnabled else { return }
+                    if ok {
+                        self.healthFailCount = 0
+                    } else {
+                        self.healthFailCount += 1
+                        PiPDebug.log("局域网健康检查失败 x\(self.healthFailCount)")
+                        if self.healthFailCount >= 2 {
+                            self.handleConnectionLost()
+                        }
+                    }
+                }
+            }.resume()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        healthPollTimer = timer
     }
 
     /// 连接断开：关小窗 + 退出悬浮模式
