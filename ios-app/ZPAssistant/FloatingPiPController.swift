@@ -221,7 +221,15 @@ extension FloatingPiPController {
         floatingEnabled = false
         userStopRequested = true
         pipController?.stopPictureInPicture()
-        cleanup()
+        // 关窗是异步的：0.6s 后补关一次并清理（didStop 也会触发 cleanup，二者幂等）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self = self else { return }
+            if self.pipController != nil {
+                PiPDebug.log("断开关窗：0.6s 补关")
+                self.pipController?.stopPictureInPicture()
+            }
+            self.cleanup()
+        }
     }
 
     fileprivate func reassertSession() {
