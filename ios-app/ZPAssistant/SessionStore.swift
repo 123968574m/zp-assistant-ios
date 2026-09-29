@@ -151,9 +151,12 @@ final class SessionStore: ObservableObject {
             // 云端模式在 bound 之后才算连上
         }
         sk.on(clientEvent: .disconnect) { [weak self] data, _ in
-            // 主动断开(reason=manual)不再重连；其余交给 .reconnects(true)
+            // 任何断开（对端关闭/网络掉线/主动断开）都按"已断开"处理，
+            // 并通知悬浮控制器关闭小窗；socket.io 自身仍会尝试重连
             let reason = data.first as? String ?? ""
-            self?.setMain(reason == "manual" ? .disconnected : .connecting) { self?.connState = $0 }
+            PiPDebug.log("socket 断开：\(reason)")
+            self?.setMain(.disconnected) { self?.connState = $0 }
+            self?.onDisconnected?()
         }
         sk.on(clientEvent: .error) { [weak self] data, _ in
             let msg = data.first as? String ?? "unknown"
