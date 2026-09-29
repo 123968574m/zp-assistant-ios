@@ -33,8 +33,8 @@ targets:
       path: ZPAssistant/Info.plist
       properties:
         CFBundleDisplayName: 领航者
-        CFBundleShortVersionString: "1.1.6"
-        CFBundleVersion: "8"
+        CFBundleShortVersionString: "1.1.7"
+        CFBundleVersion: "9"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
