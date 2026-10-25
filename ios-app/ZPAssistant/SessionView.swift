@@ -4,6 +4,9 @@ import SwiftUI
 struct SessionView: View {
     @EnvironmentObject var store: SessionStore
     @ObservedObject private var pip = FloatingPiPController.shared
+    @AppStorage("autoSearchEnabled") private var autoSearchEnabled = false
+    @AppStorage("autoSearchInterval") private var autoSearchInterval = "45"
+    @State private var autoSearchTimer: Timer?
 
     var body: some View {
         ZStack {
@@ -13,10 +16,21 @@ struct SessionView: View {
                 Divider().overlay(Color.navBorder)
                 answerArea
                 Divider().overlay(Color.navBorder)
+                autoSearchRow
                 controls
             }
         }
         .preferredColorScheme(.dark)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            // Timer 在后台被系统暂停：回前台时若开关仍开则继续
+            if autoSearchEnabled && autoSearchTimer == nil && store.isConnected {
+                startAutoSearchTimer()
+            }
+        }
+        .onDisappear {
+            autoSearchTimer?.invalidate()
+            autoSearchTimer = nil
+        }
     }
 
     private var header: some View {
@@ -109,6 +123,58 @@ struct SessionView: View {
             .onChange(of: store.answerText) { _ in
                 proxy.scrollTo("answer.full", anchor: .bottom)
             }
+        }
+    }
+
+    // 自动搜题：开启即发第一次截图（计时起点），之后每 n 秒一次
+    private var autoSearchRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14))
+                .foregroundColor(.navAccent)
+                .frame(width: 30)
+            Text("自动搜题")
+                .font(.subheadline)
+                .foregroundColor(.navText)
+            Spacer()
+            TextField("秒", text: $autoSearchInterval)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.center)
+                .font(.system(size: 13, design: .monospaced))
+                .frame(width: 52, height: 30)
+                .background(Color.navSurface)
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.navBorder, lineWidth: 1))
+            Text("秒/次")
+                .font(.caption2)
+                .foregroundColor(.navMuted)
+            Toggle("", isOn: Binding(
+                get: { autoSearchEnabled },
+                set: { on in
+                    autoSearchEnabled = on
+                    if on {
+                        store.send(action: "screenshot")
+                        startAutoSearchTimer()
+                    } else {
+                        autoSearchTimer?.invalidate()
+                        autoSearchTimer = nil
+                    }
+                }
+            ))
+            .labelsHidden()
+            .tint(.navAccent)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.navSurface)
+    }
+
+    private func startAutoSearchTimer() {
+        autoSearchTimer?.invalidate()
+        let n = Double(autoSearchInterval) ?? 45
+        guard n >= 5 else { return }
+        autoSearchTimer = Timer.scheduledTimer(withTimeInterval: n, repeats: true) { _ in
+            store.send(action: "screenshot")
         }
     }
 
