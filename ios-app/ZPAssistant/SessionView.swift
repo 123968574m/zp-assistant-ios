@@ -24,6 +24,7 @@ struct SessionView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             // Timer 在后台被系统暂停：回前台时若开关仍开则继续
             if autoSearchEnabled && autoSearchTimer == nil && store.isConnected {
+                store.sendScreenshotThrottled()
                 startAutoSearchTimer()
             }
         }
@@ -153,7 +154,7 @@ struct SessionView: View {
                 set: { on in
                     autoSearchEnabled = on
                     if on {
-                        store.send(action: "screenshot")
+                        store.sendScreenshotThrottled()
                         startAutoSearchTimer()
                     } else {
                         autoSearchTimer?.invalidate()
@@ -174,14 +175,14 @@ struct SessionView: View {
         let n = Double(autoSearchInterval) ?? 45
         guard n >= 5 else { return }
         autoSearchTimer = Timer.scheduledTimer(withTimeInterval: n, repeats: true) { _ in
-            store.send(action: "screenshot")
+            store.sendScreenshotThrottled()
         }
     }
 
     private var controls: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
             ControlButton(title: "截图", icon: "camera.fill", tint: .navAccent,
-                          enabled: store.features.screenshot) { store.send(action: "screenshot") }
+                          enabled: store.features.screenshot) { store.sendScreenshotThrottled() }
             ControlButton(title: "切换模式", icon: "arrow.triangle.2.circlepath", tint: .navAccent,
                           enabled: store.features.switchMode) { store.send(action: "switchMode") }
             ControlButton(title: "停止生成", icon: "stop.fill", tint: .navRed,
