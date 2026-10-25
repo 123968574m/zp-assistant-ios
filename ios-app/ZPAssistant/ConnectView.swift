@@ -18,6 +18,7 @@ struct ConnectView: View {
     @State private var showScanner = false
 
     // 云端
+    @AppStorage("relayServer") private var relayServer = SessionStore.defaultRelayServer
     @State private var selectedHost: RelayHost?
     @State private var code = ""
 
@@ -110,11 +111,21 @@ extension ConnectView {
 
     private var cloudForm: some View {
         VStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("中继服务器").font(.caption).foregroundColor(.navMuted)
+                TextField("如 http://45.197.148.9:8443", text: $relayServer)
+                    .keyboardType(.URL)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .foregroundColor(.navText)
+                    .navField()
+            }
+
             HStack {
                 infoCard("桌面端开启「云端中继」后，设备会出现在下方列表；点选设备并输入 6 位访问码即可配对，无需同一 Wi-Fi。")
                 Button {
                     PiPDebug.log("云端：手动刷新设备列表")
-                    store.connectCloud()
+                    store.connectRelay(server: relayServer)
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .foregroundColor(.navAccent)
