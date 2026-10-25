@@ -51,6 +51,10 @@ final class SessionStore: ObservableObject {
 
     enum Mode { case lan, cloud }
     private var mode: Mode = .lan
+    /// 公网中继默认地址（域名被 SNI 阻断，改用 IP 明文端口直连）
+    static let defaultRelayServer = "http://45.197.148.9:8443"
+    private var lastBindHost: String?
+    private var lastBindCode: String?
 
     /// 连接断开/失败时的回调（悬浮控制器用来关闭小窗）
     var onDisconnected: (() -> Void)?
@@ -113,11 +117,14 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// 云端中继（非局域网）：连 navway.cc.cd 的 /phone 命名空间
-    func connectCloud() {
+    /// 云端中继（非局域网）：连公网中继的 /phone 命名空间
+    func connectCloud(server: String = SessionStore.defaultRelayServer) {
         disconnect()
         mode = .cloud
-        guard let url = URL(string: "https://navway.cc.cd") else {
+        var base = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !base.hasPrefix("http") { base = "http://" + base }
+        while base.hasSuffix("/") { base.removeLast() }
+        guard let url = URL(string: base) else {
             DispatchQueue.main.async { self.connState = .failed }
             return
         }
@@ -129,13 +136,15 @@ final class SessionStore: ObservableObject {
         socket = sk
         bind(sk)
         setMain(.connecting) { self.connState = $0 }
-        PiPDebug.log("云端：连接 navway.cc.cd/phone …")
+        PiPDebug.log("云端：连接 \(base)/phone …")
         sk.connect()
     }
 
     /// 配对云端设备（6 位访问码）
     func bindHost(hostId: String, code: String) {
         setMain("") { self.bindError = $0 }
+        lastBindHost = hostId
+        lastBindCode = code
         socket?.emit("bind", ["hostId": hostId, "code": code])
     }
 
@@ -152,7 +161,12 @@ final class SessionStore: ObservableObject {
                 // 连上后向桌面端要一次当前回答全文，补齐掉线窗口内丢失的分片
                 sk.emit("answer_resync")
             } else {
-                PiPDebug.log("云端：/phone 已连接，等待设备列表")
+                PiPDebug.log("云端：/phone 已连接")
+                // 掉线重连后自动恢复绑定（无需重新选设备/输码）
+                if let hostId = self.lastBindHost, let code = self.lastBindCode {
+                    PiPDebug.log("云端：自动重绑…")
+                    sk.emit("bind", ["hostId": hostId, "code": code])
+                }
             }
             // 云端模式在 bound 之后才算连上
         }
