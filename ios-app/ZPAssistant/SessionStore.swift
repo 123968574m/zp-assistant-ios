@@ -118,7 +118,7 @@ final class SessionStore: ObservableObject {
     }
 
     /// 云端中继（非局域网）：连公网中继的 /phone 命名空间
-    func connectCloud(server: String = SessionStore.defaultRelayServer) {
+    func connectRelay(server: String = SessionStore.defaultRelayServer) {
         disconnect()
         mode = .cloud
         var base = server.trimmingCharacters(in: .whitespacesAndNewlines)
