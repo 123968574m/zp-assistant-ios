@@ -140,6 +140,17 @@ final class SessionStore: ObservableObject {
         sk.connect()
     }
 
+    private var lastScreenshotAt = Date.distantPast
+
+    /// 截图发送统一入口：手动按钮与自动搜题共用，2 秒内不重复发送
+    /// （避免手动按键撞上自动搜题节奏，导致同一题双发/打断刚生成的回答）
+    func sendScreenshotThrottled(minInterval: TimeInterval = 2) {
+        let now = Date()
+        guard now.timeIntervalSince(lastScreenshotAt) >= minInterval else { return }
+        lastScreenshotAt = now
+        send(action: "screenshot")
+    }
+
     /// 配对云端设备（6 位访问码）
     func bindHost(hostId: String, code: String) {
         setMain("") { self.bindError = $0 }
